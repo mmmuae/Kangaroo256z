@@ -24,8 +24,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-#include <algorithm>
-
 #include <stdint.h>
 #include "../Timer.h"
 
@@ -97,36 +95,6 @@ __global__ void check_gpu() {
 
 using namespace std;
 
-static bool WaitForStream(cudaStream_t stream,bool spinWait) {
-
-  if(stream == 0)
-    return true;
-
-  if(spinWait) {
-    cudaError_t err = cudaStreamSynchronize(stream);
-    if(err != cudaSuccess) {
-      printf("GPUEngine: cudaStreamSynchronize %s\n",cudaGetErrorString(err));
-      return false;
-    }
-    return true;
-  }
-
-  while(true) {
-    cudaError_t err = cudaStreamQuery(stream);
-    if(err == cudaSuccess) {
-      return true;
-    }
-    if(err != cudaErrorNotReady) {
-      printf("GPUEngine: cudaStreamQuery %s\n",cudaGetErrorString(err));
-      return false;
-    }
-    Timer::SleepMillis(1);
-  }
-
-  return true;
-
-}
-
 int _ConvertSMVer2Cores(int major,int minor) {
 
   // Defines for GPU Architecture types (using the SM version to determine
@@ -155,10 +123,6 @@ int _ConvertSMVer2Cores(int major,int minor) {
     { 0x75,  64 },
     { 0x80,  64 },
     { 0x86, 128 },
-    { 0x87, 128 },
-    { 0x89, 128 },
-    { 0x90, 192 },
-    { 0x91, 192 },
     { -1, -1 } };
 
   int index = 0;
@@ -185,15 +149,6 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
   this->nbThreadPerGroup = nbThreadPerGroup;
   initialised = false;
   cudaError_t err;
-  computeStream = 0;
-  copyStream = 0;
-  kernelFinished[0] = 0;
-  kernelFinished[1] = 0;
-  outputItem[0] = NULL;
-  outputItem[1] = NULL;
-  nextOutputBuffer = 0;
-  lastLaunchedBuffer = -1;
-  kernelInFlight = false;
 
   int deviceCount = 0;
   cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
@@ -236,13 +191,11 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     printf("GPUEngine: %s\n",cudaGetErrorString(err));
     return;
   }
-#if defined(cudaFuncAttributePreferredSharedMemoryCarveout) && defined(cudaSharedmemCarveoutMaxL1)
-  cudaFuncSetAttribute(comp_kangaroos,cudaFuncAttributePreferredSharedMemoryCarveout,cudaSharedmemCarveoutMaxL1);
-#endif
 
   // Allocate memory
   inputKangaroo = NULL;
   inputKangarooPinned = NULL;
+  outputItem = NULL;
   outputItemPinned = NULL;
   jumpPinned = NULL;
   dpMask=NULL;
@@ -268,13 +221,11 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
     return;
   }
 
-  // Output buffers (double buffered)
-  for(int i = 0; i < 2; i++) {
-    err = cudaMalloc((void **)&outputItem[i],outputSize);
-    if(err != cudaSuccess) {
-      printf("GPUEngine: Allocate output memory #%d: %s\n",i,cudaGetErrorString(err));
-      return;
-    }
+  // OutputHash
+  err = cudaMalloc((void **)&outputItem,outputSize);
+  if(err != cudaSuccess) {
+    printf("GPUEngine: Allocate output memory: %s\n",cudaGetErrorString(err));
+    return;
   }
   err = cudaHostAlloc(&outputItemPinned,outputSize,cudaHostAllocMapped);
   if(err != cudaSuccess) {
@@ -288,24 +239,6 @@ GPUEngine::GPUEngine(int nbThreadGroup,int nbThreadPerGroup,int gpuId,uint32_t m
   if(err != cudaSuccess) {
     printf("GPUEngine: Allocate jump pinned memory: %s\n",cudaGetErrorString(err));
     return;
-  }
-
-  err = cudaStreamCreateWithFlags(&computeStream,cudaStreamNonBlocking);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: Create compute stream: %s\n",cudaGetErrorString(err));
-    return;
-  }
-  err = cudaStreamCreateWithFlags(&copyStream,cudaStreamNonBlocking);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: Create copy stream: %s\n",cudaGetErrorString(err));
-    return;
-  }
-  for(int i = 0; i < 2; i++) {
-    err = cudaEventCreateWithFlags(&kernelFinished[i],cudaEventDisableTiming);
-    if(err != cudaSuccess) {
-      printf("GPUEngine: Create event #%d: %s\n",i,cudaGetErrorString(err));
-      return;
-    }
   }
 
   lostWarning = false;
@@ -333,21 +266,16 @@ GPUEngine::~GPUEngine() {
 
   if(dpMask) cudaFree(dpMask);
   if(inputKangaroo) cudaFree(inputKangaroo);
-  for(int i = 0; i < 2; i++)
-    if(outputItem[i]) cudaFree(outputItem[i]);
+  if(outputItem) cudaFree(outputItem);
   if(inputKangarooPinned) cudaFreeHost(inputKangarooPinned);
   if(outputItemPinned) cudaFreeHost(outputItemPinned);
   if(jumpPinned) cudaFreeHost(jumpPinned);
-  for(int i = 0; i < 2; i++)
-    if(kernelFinished[i]) cudaEventDestroy(kernelFinished[i]);
-  if(computeStream) cudaStreamDestroy(computeStream);
-  if(copyStream) cudaStreamDestroy(copyStream);
 
 }
 
 
 int GPUEngine::GetMemory() {
-  return kangarooSize + 2 * outputSize + jumpSize;
+  return kangarooSize + outputSize + jumpSize;
 }
 
 
@@ -381,36 +309,9 @@ bool GPUEngine::GetGridSize(int gpuId,int *x,int *y) {
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp,gpuId);
 
-    int warpSize = (deviceProp.warpSize > 0 ? deviceProp.warpSize : 32);
-    int minGridSize = 0;
-    int suggestedBlockSize = 0;
-    cudaError_t occ = cudaOccupancyMaxPotentialBlockSize(&minGridSize,&suggestedBlockSize,comp_kangaroos,0,0);
-    if(occ != cudaSuccess) {
-      suggestedBlockSize = 0;
-      minGridSize = 0;
-    }
-
-    if(*y <= 0) {
-      if(suggestedBlockSize <= 0) {
-        suggestedBlockSize = 2 * _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor);
-      }
-      if(suggestedBlockSize <= 0) {
-        suggestedBlockSize = warpSize * 4;
-      }
-      suggestedBlockSize = std::min(suggestedBlockSize,deviceProp.maxThreadsPerBlock);
-      if(suggestedBlockSize < warpSize) suggestedBlockSize = warpSize;
-      suggestedBlockSize = ((suggestedBlockSize + warpSize - 1) / warpSize) * warpSize;
-      *y = suggestedBlockSize;
-    }
-
-    if(*x <= 0) {
-      int blocks = std::max(2 * deviceProp.multiProcessorCount,minGridSize);
-      if(deviceProp.major >= 9)
-        blocks = std::max(blocks,deviceProp.multiProcessorCount * 6);
-      if(blocks <= 0)
-        blocks = deviceProp.multiProcessorCount;
-      *x = blocks;
-    }
+    if(*x <= 0) *x = 2 * deviceProp.multiProcessorCount;
+    if(*y <= 0) *y = 2 * _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor);
+    if(*y <= 0) *y = 128;
 
   }
 
@@ -656,108 +557,68 @@ void GPUEngine::SetKangaroo(uint64_t kIdx,Int *px,Int *py,Int *d) {
 
 bool GPUEngine::callKernel() {
 
-  if(!initialised)
-    return false;
-
-  int writeBuffer = nextOutputBuffer;
-  nextOutputBuffer ^= 1;
-
-  cudaError_t err = cudaMemsetAsync(outputItem[writeBuffer],0,4,computeStream);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: cudaMemsetAsync: %s\n",cudaGetErrorString(err));
-    return false;
-  }
+  // Reset nbFound
+  cudaMemset(outputItem,0,4);
 
   // Call the kernel (Perform STEP_SIZE keys per thread)
-  comp_kangaroos<<<nbThread / nbThreadPerGroup,nbThreadPerGroup,0,computeStream>>>
-      (inputKangaroo,maxFound,outputItem[writeBuffer],dpMask);
+  comp_kangaroos << < nbThread / nbThreadPerGroup,nbThreadPerGroup >> >
+      (inputKangaroo,maxFound,outputItem,dpMask);
 
-  err = cudaGetLastError();
+  cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
     printf("GPUEngine: Kernel: %s\n",cudaGetErrorString(err));
     return false;
   }
-
-  err = cudaEventRecord(kernelFinished[writeBuffer],computeStream);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: cudaEventRecord: %s\n",cudaGetErrorString(err));
-    return false;
-  }
-
-  lastLaunchedBuffer = writeBuffer;
-  kernelInFlight = true;
 
   return true;
 
 }
 
 void GPUEngine::SetParams(Int *dpMask,Int *distance,Int *px,Int *py) {
-
-  if(!initialised)
-    return;
-
-  if(!WaitForStream(computeStream,true) || !WaitForStream(copyStream,true)) {
-    printf("GPUEngine: SetParams: Unable to sync CUDA streams before uploading parameters\n");
-    return;
-  }
-
   uint64_t hostDpMask[4];
 
   hostDpMask[0] = dpMask->bits64[0];
   hostDpMask[1] = dpMask->bits64[1];
   hostDpMask[2] = dpMask->bits64[2];
   hostDpMask[3] = dpMask->bits64[3];
-
-  cudaError_t err = cudaMemcpyAsync(this->dpMask,hostDpMask,32,cudaMemcpyHostToDevice,copyStream);
+  cudaMemcpy(this->dpMask, hostDpMask, 32, cudaMemcpyHostToDevice);
+  for(int i=0;i< NB_JUMP;i++)
+    memcpy(jumpPinned + 4*i,distance[i].bits64,32);
+  cudaMemcpyToSymbol(jD,jumpPinned,jumpSize);
+  cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
-    printf("GPUEngine: SetParams: Failed to copy dpMask: %s\n",cudaGetErrorString(err));
+    printf("GPUEngine: SetParams: Failed to copy to constant memory (distance): %s\n",cudaGetErrorString(err));
     return;
   }
-
-  if(!UploadJumpTable(distance,"distance",jD) ||
-     !UploadJumpTable(px,"px",jPx) ||
-     !UploadJumpTable(py,"py",jPy)) {
-    return;
-  }
-
-  err = cudaStreamSynchronize(copyStream);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: SetParams: Failed to synchronize copy stream: %s\n",cudaGetErrorString(err));
-    return;
-  }
-
-}
-
-bool GPUEngine::UploadJumpTable(const Int *src,const char *label,const void *symbol) {
 
   for(int i = 0; i < NB_JUMP; i++)
-    memcpy(jumpPinned + 4 * i,src[i].bits64,32);
-
-  cudaError_t err = cudaMemcpyToSymbolAsync(symbol,jumpPinned,jumpSize,0,cudaMemcpyHostToDevice,copyStream);
+    memcpy(jumpPinned + 4 * i,px[i].bits64,32);
+  cudaMemcpyToSymbol(jPx,jumpPinned,jumpSize);
+  err = cudaGetLastError();
   if(err != cudaSuccess) {
-    printf("GPUEngine: SetParams: Failed to copy to constant memory (%s): %s\n",label,cudaGetErrorString(err));
-    return false;
+    printf("GPUEngine: SetParams: Failed to copy to constant memory (px): %s\n",cudaGetErrorString(err));
+    return;
   }
 
-  return true;
+  for(int i = 0; i < NB_JUMP; i++)
+    memcpy(jumpPinned + 4 * i,py[i].bits64,32);
+  cudaMemcpyToSymbol(jPy,jumpPinned,jumpSize);
+  err = cudaGetLastError();
+  if(err != cudaSuccess) {
+    printf("GPUEngine: SetParams: Failed to copy to constant memory (py): %s\n",cudaGetErrorString(err));
+    return;
+  }
 
 }
 
 bool GPUEngine::callKernelAndWait() {
 
   // Debug function
-  if(!callKernel())
-    return false;
-
-  cudaError_t err = cudaEventSynchronize(kernelFinished[lastLaunchedBuffer]);
+  callKernel();
+  cudaMemcpy(outputItemPinned,outputItem,outputSize,cudaMemcpyDeviceToHost);
+  cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
-    printf("GPUEngine: callKernelAndWait event: %s\n",cudaGetErrorString(err));
-    return false;
-  }
-
-  err = cudaMemcpy(outputItemPinned,outputItem[lastLaunchedBuffer],outputSize,cudaMemcpyDeviceToHost);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: callKernelAndWait memcpy: %s\n",cudaGetErrorString(err));
+    printf("GPUEngine: callKernelAndWait: %s\n",cudaGetErrorString(err));
     return false;
   }
 
@@ -770,25 +631,32 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
 
   hashFound.clear();
 
-  if(!kernelInFlight)
-    return false;
+  // Get the result
 
-  int bufferToRead = lastLaunchedBuffer;
+  if(spinWait) {
 
-  cudaError_t err = cudaEventSynchronize(kernelFinished[bufferToRead]);
-  if(err != cudaSuccess) {
-    printf("GPUEngine: Launch wait kernel: %s\n",cudaGetErrorString(err));
-    return false;
+    cudaMemcpy(outputItemPinned,outputItem,outputSize,cudaMemcpyDeviceToHost);
+
+  } else {
+
+    // Use cudaMemcpyAsync to avoid default spin wait of cudaMemcpy wich takes 100% CPU
+    cudaEvent_t evt;
+    cudaEventCreate(&evt);
+    cudaMemcpyAsync(outputItemPinned,outputItem,4,cudaMemcpyDeviceToHost,0);
+    cudaEventRecord(evt,0);
+    while(cudaEventQuery(evt) == cudaErrorNotReady) {
+      // Sleep 1 ms to free the CPU
+      Timer::SleepMillis(1);
+    }
+    cudaEventDestroy(evt);
+
   }
 
-  err = cudaMemcpyAsync(outputItemPinned,outputItem[bufferToRead],4,cudaMemcpyDeviceToHost,copyStream);
+  cudaError_t err = cudaGetLastError();
   if(err != cudaSuccess) {
-    printf("GPUEngine: Launch prefix copy: %s\n",cudaGetErrorString(err));
+    // printf("GPUEngine: Launch: %s\n",cudaGetErrorString(err));
     return false;
   }
-
-  if(!WaitForStream(copyStream,spinWait))
-    return false;
 
   // Look for prefix found
   uint32_t nbFound = outputItemPinned[0];
@@ -801,21 +669,8 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
     nbFound = maxFound;
   }
 
-  size_t copySize = nbFound * ITEM_SIZE + 4;
-  if(copySize > 4) {
-    err = cudaMemcpyAsync(outputItemPinned,outputItem[bufferToRead],copySize,cudaMemcpyDeviceToHost,copyStream);
-    if(err != cudaSuccess) {
-      printf("GPUEngine: Launch copy: %s\n",cudaGetErrorString(err));
-      return false;
-    }
-  }
-
-  bool kernelOk = callKernel();
-
-  if(copySize > 4) {
-    if(!WaitForStream(copyStream,true))
-      return false;
-  }
+  // When can perform a standard copy, the kernel is eneded
+  cudaMemcpy(outputItemPinned,outputItem,nbFound*ITEM_SIZE + 4,cudaMemcpyDeviceToHost);
 
   for(uint32_t i = 0; i < nbFound; i++) {
     uint32_t *itemPtr = outputItemPinned + (i*ITEM_SIZE32 + 1);
@@ -841,11 +696,6 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
     hashFound.push_back(it);
   }
 
-  if(!kernelOk) {
-    kernelInFlight = false;
-    return false;
-  }
-
-  return true;
+  return callKernel();
 
 }

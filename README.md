@@ -50,8 +50,21 @@ Kangaroo [-v] [-t nbThread] [-d dpBit] [gpu] [-check]
  -o fileName: output result to fileName
  -l: List cuda enabled devices
  -check: Check GPU kernel vs CPU
- inFile: intput configuration file
+ -inFile: intput configuration file
 ```
+
+## GPU build targets and RTX 5090 guidance
+
+The CUDA build accepts an explicit compute capability through the `ccap` make variable (see `Makefile`). For Blackwell-class
+boards such as the RTX 5090 you should target `sm_90`, so invoke the build as:
+
+```
+make gpu=1 ccap=90 -j4
+```
+
+Passing `ccap=89` will under-utilise the card, while `ccap=120` is not a valid architecture flag for the current toolchain. You
+can confirm the detected compute capability at runtime via `-l`/`--list` which triggers `GPUEngine::PrintCudaInfo` to dump the
+major/minor values reported by `cudaGetDeviceProperties`.
 
 Structure of the input file:
 * All values are in hex format

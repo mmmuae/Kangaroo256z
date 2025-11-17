@@ -17,7 +17,7 @@
 
 #ifndef TIMERH
 #define TIMERH
-
+#include <cstdint>
 #include <time.h>
 #include <string>
 #ifdef WIN64

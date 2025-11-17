@@ -21,10 +21,6 @@
 #include <vector>
 #include "../Constants.h"
 #include "../SECPK1/SECP256k1.h"
-struct CUstream_st;
-struct CUevent_st;
-typedef CUstream_st* cudaStream_t;
-typedef CUevent_st* cudaEvent_t;
 
 #ifdef USE_SYMMETRY
 #define KSIZE 11
@@ -68,14 +64,13 @@ public:
   static bool GetGridSize(int gpuId,int *x,int *y);
 
 private:
-  bool UploadJumpTable(const Int *src,const char *label,const void *symbol);
 
   Int wildOffset;
   int nbThread;
   int nbThreadPerGroup;
   uint64_t *inputKangaroo;
   uint64_t *inputKangarooPinned;
-  uint32_t *outputItem[2];
+  uint32_t *outputItem;
   uint32_t *outputItemPinned;
   uint64_t *jumpPinned;
   bool initialised;
@@ -86,12 +81,6 @@ private:
   uint32_t kangarooSizePinned;
   uint32_t jumpSize;
   uint64_t *dpMask;
-  cudaStream_t computeStream;
-  cudaStream_t copyStream;
-  cudaEvent_t kernelFinished[2];
-  int nextOutputBuffer;
-  int lastLaunchedBuffer;
-  bool kernelInFlight;
 };
 
 #endif // GPUENGINEH

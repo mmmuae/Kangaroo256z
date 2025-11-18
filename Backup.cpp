@@ -26,7 +26,6 @@
 #ifndef WIN64
 #include <pthread.h>
 #include <sys/stat.h>
-#include <fcntl.h>
 #endif
 
 using namespace std;
@@ -587,18 +586,8 @@ void Kangaroo::WorkInfo(std::string &fName) {
     return;
 
 #ifndef WIN64
-#if defined(POSIX_FADV_RANDOM) || defined(POSIX_FADV_NOREUSE)
   int fd = fileno(f1);
-  int adviseMask = 0;
-#ifdef POSIX_FADV_RANDOM
-  adviseMask |= POSIX_FADV_RANDOM;
-#endif
-#ifdef POSIX_FADV_NOREUSE
-  adviseMask |= POSIX_FADV_NOREUSE;
-#endif
-  if(adviseMask)
-    posix_fadvise(fd,0,0,adviseMask);
-#endif
+  posix_fadvise(fd,0,0,POSIX_FADV_RANDOM|POSIX_FADV_NOREUSE);
 #endif
 
   uint32_t dp1;

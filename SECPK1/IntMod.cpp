@@ -16,54 +16,8 @@
 */
 
 #include "Int.h"
-#include <string.h>
-
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
-#define KANGAROO_HAS_NATIVE_M128I 1
-#else
-#define KANGAROO_HAS_NATIVE_M128I 0
-#endif
-
-#if KANGAROO_HAS_NATIVE_M128I
-using KangM128i = __m128i;
-static inline KangM128i kang_mm_slli_epi64(KangM128i v,int shift) {
-  return _mm_slli_epi64(v,shift);
-}
-static inline KangM128i kang_mm_add_epi64(KangM128i a,KangM128i b) {
-  return _mm_add_epi64(a,b);
-}
-static inline KangM128i kang_mm_sub_epi64(KangM128i a,KangM128i b) {
-  return _mm_sub_epi64(a,b);
-}
-#else
-struct KangM128i {
-  uint64_t m128i_u64[2];
-};
-static inline KangM128i kang_mm_slli_epi64(KangM128i v,int shift) {
-  KangM128i r;
-  if(shift >= 64) {
-    r.m128i_u64[0] = 0;
-    r.m128i_u64[1] = 0;
-  } else {
-    r.m128i_u64[0] = v.m128i_u64[0] << shift;
-    r.m128i_u64[1] = v.m128i_u64[1] << shift;
-  }
-  return r;
-}
-static inline KangM128i kang_mm_add_epi64(KangM128i a,KangM128i b) {
-  KangM128i r;
-  r.m128i_u64[0] = a.m128i_u64[0] + b.m128i_u64[0];
-  r.m128i_u64[1] = a.m128i_u64[1] + b.m128i_u64[1];
-  return r;
-}
-static inline KangM128i kang_mm_sub_epi64(KangM128i a,KangM128i b) {
-  KangM128i r;
-  r.m128i_u64[0] = a.m128i_u64[0] - b.m128i_u64[0];
-  r.m128i_u64[1] = a.m128i_u64[1] - b.m128i_u64[1];
-  return r;
-}
-#endif
+#include <string.h>
 
 #define MAX(x,y) (((x)>(y))?(x):(y))
 #define MIN(x,y) (((x)<(y))?(x):(y))
@@ -197,8 +151,8 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
 
   bitCount = 62;
   int64_t nb0;
-  KangM128i _u;
-  KangM128i _v;
+  __m128i _u;
+  __m128i _v;
   _u.m128i_u64[0] = 1;
   _u.m128i_u64[1] = 0;
   _v.m128i_u64[0] = 0;
@@ -208,7 +162,7 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
 
     int zeros = TZC(v0 | (UINT64_MAX << bitCount));
     v0 >>= zeros;
-    _u = kang_mm_slli_epi64(_u,(int)zeros);
+    _u = _mm_slli_epi64(_u,(int)zeros);
     bitCount -= zeros;
 
     if(bitCount <= 0)
@@ -216,12 +170,12 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
 
     nb0 = (v0 + u0) & 0x3;
     if(nb0 == 0) {
-      _v = kang_mm_add_epi64(_v,_u);
-      _u = kang_mm_sub_epi64(_u,_v);
+      _v = _mm_add_epi64(_v,_u);
+      _u = _mm_sub_epi64(_u,_v);
       SWAP_ADD(v0,u0);
     } else {
-      _v = kang_mm_sub_epi64(_v,_u);
-      _u = kang_mm_add_epi64(_u,_v);
+      _v = _mm_sub_epi64(_v,_u);
+      _u = _mm_add_epi64(_u,_v);
       SWAP_SUB(v0,u0);
     }
 
@@ -267,9 +221,9 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
 
   bitCount = 62;
 
-  KangM128i _u;
-  KangM128i _v;
-  KangM128i _t;
+  __m128i _u;
+  __m128i _v;
+  __m128i _t;
 
 #ifdef WIN64
   _u.m128i_u64[0] = 1;
@@ -289,7 +243,7 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
     uint64_t zeros = TZC(v0 | 1ULL << bitCount);
     vh >>= zeros;
     v0 >>= zeros;
-    _u = kang_mm_slli_epi64(_u,(int)zeros);
+    _u = _mm_slli_epi64(_u,(int)zeros);
     bitCount -= (int)zeros;
 
     if(bitCount <= 0) {
@@ -304,7 +258,7 @@ void Int::DivStep62(Int* u,Int* v,int64_t* eta,int* pos,int64_t* uu,int64_t* uv,
 
     vh -= uh;
     v0 -= u0;
-    _v = kang_mm_sub_epi64(_v,_u);
+    _v = _mm_sub_epi64(_v,_u);
 
   }
 

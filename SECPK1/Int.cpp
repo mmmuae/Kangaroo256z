@@ -19,7 +19,6 @@
 #include "IntGroup.h"
 #include <string.h>
 #include <math.h>
-#include <emmintrin.h>
 #include "../Timer.h"
 
 #define MAX(x,y) (((x)>(y))?(x):(y))

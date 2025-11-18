@@ -44,6 +44,14 @@ CUDA       = /usr/local/cuda
 CXXCUDA    = /usr/bin/g++
 NVCC       = $(CUDA)/bin/nvcc
 
+# Detect the build host so we can avoid forcing x86 specific flags on Apple Silicon
+ARCH      ?= $(shell uname -m 2>/dev/null || echo unknown)
+ifeq (,$(filter x86_64 amd64,$(ARCH)))
+SSE_FLAGS =
+else
+SSE_FLAGS = -mssse3
+endif
+
 
 all: driverquery bsgs
 
@@ -64,18 +72,18 @@ endif
 ifdef gpu
 
 ifdef debug
-CXXFLAGS   = -DWITHGPU -m64  -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -DWITHGPU -m64 $(SSE_FLAGS) -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
 else
-CXXFLAGS   = -DWITHGPU -m64 -mssse3 -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
+CXXFLAGS   = -DWITHGPU -m64 $(SSE_FLAGS) -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
 
 else
 
 ifdef debug
-CXXFLAGS   = -m64 -mssse3 -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -m64 $(SSE_FLAGS) -Wno-unused-result -Wno-write-strings -g -I. -I$(CUDA)/include
 else
-CXXFLAGS   =  -m64 -mssse3 -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
+CXXFLAGS   =  -m64 $(SSE_FLAGS) -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
 endif
 LFLAGS     = -lpthread
 

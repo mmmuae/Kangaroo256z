@@ -745,12 +745,7 @@ void Kangaroo::RunServer() {
   soc_addr.sin_port = htons(port);
   soc_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  // On POSIX systems bind() returns 0 on success and -1 on failure. The
-  // std::bind helper in <functional> shares the same symbol name, so qualify
-  // the call and explicitly check for an error code to avoid accidental
-  // overload resolution when compiling on platforms like macOS where std::bind
-  // may be pulled in via other headers.
-  if(::bind(serverSock,(struct sockaddr*)&soc_addr,sizeof(soc_addr)) < 0) {
+  if(bind(serverSock,(struct sockaddr*)&soc_addr,sizeof(soc_addr))) {
     ::printf("Error: Can not bind socket. Another server running?\n%s\n",GetNetworkError().c_str());
     exit(-1);
   }

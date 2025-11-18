@@ -23,6 +23,13 @@
 #include "Random.h"
 #include <string>
 #include <inttypes.h>
+#include <chrono>
+#if defined(__APPLE__) && !defined(WIN64)
+#include <mach/mach_time.h>
+#endif
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
 
 // We need 1 extra block for Knuth div algorithm , Montgomery multiplication and ModInv
 #define BISIZE 256
@@ -214,6 +221,8 @@ private:
 
 #ifndef WIN64
 
+#if defined(__x86_64__) || defined(__i386__)
+
 // Missing intrinsics
 static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
   uint64_t rhi;
@@ -228,7 +237,7 @@ static int64_t inline _mul128(int64_t a, int64_t b, int64_t *h) {
   uint64_t rlo;
   __asm__( "imulq  %[b];" :"=d"(rhi),"=a"(rlo) :"1"(a),[b]"rm"(b));
   *h = rhi;
-  return rlo;  
+  return rlo;
 }
 
 static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d,uint64_t *r) {
@@ -236,7 +245,7 @@ static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d,uint64_t *r
   uint64_t _r;
   __asm__( "divq  %[d];" :"=d"(_r),"=a"(q) :"d"(hi),"a"(lo),[d]"rm"(d));
   *r = _r;
-  return q;  
+  return q;
 }
 
 static uint64_t inline __rdtsc() {
@@ -255,6 +264,77 @@ static uint64_t inline __rdtsc() {
 #define _byteswap_uint64 __builtin_bswap64
 #define LZC(x) __builtin_clzll(x)
 #define TZC(x) __builtin_ctzll(x)
+
+#else
+
+static inline uint64_t _umul128(uint64_t a,uint64_t b,uint64_t *h) {
+  __uint128_t r = ( (__uint128_t)a * b );
+  *h = (uint64_t)(r >> 64);
+  return (uint64_t)r;
+}
+
+static inline int64_t _mul128(int64_t a,int64_t b,int64_t *h) {
+  __int128 r = ( (__int128)a * (__int128)b );
+  *h = (int64_t)(r >> 64);
+  return (int64_t)r;
+}
+
+static inline uint64_t _udiv128(uint64_t hi,uint64_t lo,uint64_t d,uint64_t *r) {
+  __uint128_t n = ((__uint128_t)hi << 64) | lo;
+  uint64_t q = (uint64_t)(n / d);
+  *r = (uint64_t)(n % d);
+  return q;
+}
+
+static inline uint64_t __rdtsc() {
+#if defined(__APPLE__)
+  return mach_absolute_time();
+#else
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+#endif
+}
+
+static inline unsigned char kangaroo_addcarry_u64(unsigned char c,uint64_t a,uint64_t b,uint64_t *out) {
+#if __has_builtin(__builtin_addcll)
+  unsigned long long sum;
+  unsigned long long carry = __builtin_addcll(a,b,&sum);
+  unsigned long long carry2 = __builtin_addcll(sum,(unsigned long long)c,&sum);
+  *out = sum;
+  return (unsigned char)((carry | carry2) & 1U);
+#else
+  __uint128_t total = (__uint128_t)a + b + c;
+  *out = (uint64_t)total;
+  return (unsigned char)(total >> 64);
+#endif
+}
+
+static inline unsigned char kangaroo_subborrow_u64(unsigned char c,uint64_t a,uint64_t b,uint64_t *out) {
+#if __has_builtin(__builtin_subcll)
+  unsigned long long diff;
+  unsigned long long borrow = __builtin_subcll(a,b,&diff);
+  unsigned long long borrow2 = __builtin_subcll(diff,(unsigned long long)c,&diff);
+  *out = diff;
+  return (unsigned char)((borrow | borrow2) & 1U);
+#else
+  uint64_t tmp = a - b;
+  unsigned char borrow = tmp > a;
+  uint64_t tmp2 = tmp - (uint64_t)c;
+  borrow |= tmp2 > tmp;
+  *out = tmp2;
+  return borrow;
+#endif
+}
+
+#define __shiftright128(a,b,n) ((a)>>(n))|((b)<<(64-(n)))
+#define __shiftleft128(a,b,n) ((b)<<(n))|((a)>>(64-(n)))
+#define _addcarry_u64(a,b,c,d) kangaroo_addcarry_u64((a),(b),(c),(d))
+#define _subborrow_u64(a,b,c,d) kangaroo_subborrow_u64((a),(b),(c),(d))
+#define _byteswap_uint64 __builtin_bswap64
+#define LZC(x) __builtin_clzll(x)
+#define TZC(x) __builtin_ctzll(x)
+
+#endif // architecture check
 
 #else
 

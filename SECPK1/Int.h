@@ -298,10 +298,9 @@ static inline uint64_t __rdtsc() {
 static inline unsigned char kangaroo_addcarry_u64(unsigned char c,uint64_t a,uint64_t b,uint64_t *out) {
 #if __has_builtin(__builtin_addcll)
   unsigned long long sum;
-  unsigned long long carry = __builtin_addcll(a,b,0ULL,&sum);
-  unsigned long long carry2 = __builtin_addcll(sum,(unsigned long long)c,0ULL,&sum);
+  unsigned long long carry = __builtin_addcll(a, b, (unsigned long long)c, &sum);
   *out = sum;
-  return (unsigned char)((carry | carry2) & 1U);
+  return (unsigned char)(carry & 1U);
 #else
   __uint128_t total = (__uint128_t)a + b + c;
   *out = (uint64_t)total;
@@ -312,10 +311,9 @@ static inline unsigned char kangaroo_addcarry_u64(unsigned char c,uint64_t a,uin
 static inline unsigned char kangaroo_subborrow_u64(unsigned char c,uint64_t a,uint64_t b,uint64_t *out) {
 #if __has_builtin(__builtin_subcll)
   unsigned long long diff;
-  unsigned long long borrow = __builtin_subcll(a,b,0ULL,&diff);
-  unsigned long long borrow2 = __builtin_subcll(diff,(unsigned long long)c,0ULL,&diff);
+  unsigned long long borrow = __builtin_subcll(a, b, (unsigned long long)c, &diff);
   *out = diff;
-  return (unsigned char)((borrow | borrow2) & 1U);
+  return (unsigned char)(borrow & 1U);
 #else
   uint64_t tmp = a - b;
   unsigned char borrow = tmp > a;
